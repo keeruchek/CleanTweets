@@ -1,84 +1,111 @@
 import streamlit as st
 import tweepy
-from tweepy import OAuthHandler
-from textblob import TextBlob
-import preprocessor as p
-import text2emotion as te
-import matplotlib.pyplot as plt
 import pandas as pd
-import os
-from dotenv import load_dotenv
+import time
+from transformers import pipeline
+from sklearn.metrics import accuracy_score
 
-# Load environment variables
-load_dotenv()
+# --- CONFIGURATION & STYLING ---
+st.set_page_config(page_title="CleanTweets - AI Content Moderation", layout="wide")
+st.title("🛡️ CleanTweets: Real-time NLP Content Guard")
 
-st.set_page_config(page_title="CleanTweets", layout="wide", initial_sidebar_state="expanded")
+# --- INITIALIZE MODEL ---
+# Using a high-performance transformer model for offensive content detection
+@st.cache_resource
+def load_model():
+    # 'cardiffnlp/twitter-roberta-base-sentiment-latest' is excellent for multi-class
+    # For offensive content, we use a specialized distilbert model for sub-1s latency
+    return pipeline("text-classification", model="unitary/toxic-bert", device=-1)
 
-# Styling
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 3em;
-        color: #1DA1F2;
-        text-align: center;
-        margin-bottom: 20px;
+classifier = load_model()
+
+# --- RULE-BASED FILTERING ENGINE ---
+def rule_based_check(text):
+    blocked_keywords = ["badword1", "spamlink.com", "bot_attack"] # Add custom triggers
+    for word in blocked_keywords:
+        if word in text.lower():
+            return True, "Rule-based: Keyword Filtered"
+    return False, None
+
+# --- STREAMLIT SIDEBAR (API SETTINGS) ---
+st.sidebar.header("Settings")
+mode = st.sidebar.radio("Input Source", ["Simulation (Demo)", "Live Twitter Stream"])
+threshold = st.sidebar.slider("Sensitivity Threshold", 0.0, 1.0, 0.8)
+
+# API Keys (For Live Mode)
+bearer_token = st.sidebar.text_input("Twitter Bearer Token", type="password")
+
+# --- CORE LOGIC ---
+def process_tweet(tweet_text):
+    start_time = time.time()
+    
+    # 1. Rule-based check
+    is_blocked, reason = rule_based_check(tweet_text)
+    
+    if not is_blocked:
+        # 2. Model-driven check
+        prediction = classifier(tweet_text)[0]
+        latency = time.time() - start_time
+        
+        if prediction['score'] > threshold and prediction['label'] != 'neutral':
+            return {
+                "status": "🔴 BLOCKED",
+                "content": tweet_text,
+                "reason": f"Model-driven ({prediction['label']})",
+                "latency": f"{latency:.3f}s",
+                "score": round(prediction['score'], 3)
+            }
+    else:
+        latency = time.time() - start_time
+        return {
+            "status": "🔴 BLOCKED",
+            "content": tweet_text,
+            "reason": reason,
+            "latency": f"{latency:.3f}s",
+            "score": "N/A"
+        }
+
+    return {
+        "status": "🟢 CLEAN",
+        "content": tweet_text,
+        "reason": "Safe Content",
+        "latency": f"{time.time() - start_time:.3f}s",
+        "score": "N/A"
     }
-    .metric-box {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-        margin: 10px 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">🐦 CleanTweets - Sentiment Analysis</div>', unsafe_allow_html=True)
+# --- UI EXECUTION ---
+if mode == "Simulation (Demo)":
+    st.info("Running in simulation mode with sample data.")
+    sample_tweets = [
+        "I love this new update! Great work.",
+        "This is a total scam, click here now: spamlink.com",
+        "You are absolutely terrible and I hate you.",
+        "The weather is quite nice today in San Francisco.",
+        "Stop being such a loser and get a life."
+    ]
+    
+    if st.button("Start Simulation"):
+        results_placeholder = st.empty()
+        data = []
+        for tweet in sample_tweets:
+            res = process_tweet(tweet)
+            data.append(res)
+            # Update UI table in real-time
+            results_placeholder.table(pd.DataFrame(data))
+            time.sleep(0.5) # Simulate stream delay
 
-class TwitterClient:
-    """Twitter API client for fetching and analyzing tweets."""
-    
-    def __init__(self):
-        try:
-            consumer_key = os.getenv('TWITTER_CONSUMER_KEY')
-            consumer_secret = os.getenv('TWITTER_CONSUMER_SECRET')
-            access_token = os.getenv('TWITTER_ACCESS_TOKEN')
-            access_token_secret = os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
-            
-            if not all([consumer_key, consumer_secret, access_token, access_token_secret]):
-                raise ValueError("Missing Twitter API credentials in .env file")
-            
-            auth = OAuthHandler(consumer_key, consumer_secret)
-            auth.set_access_token(access_token, access_token_secret)
-            self.api = tweepy.API(auth)
-        except Exception as e:
-            st.error(f"Authentication failed: {e}")
-            self.api = None
-    
-    def clean_tweet(self, tweet):
-        """Clean tweet text by removing links and special characters."""
-        return ' '.join(p.clean(tweet).split())
-    
-    def get_tweet_sentiment(self, tweet):
-        """Classify sentiment using TextBlob."""
-        analysis = TextBlob(self.clean_tweet(tweet))
-        if analysis.sentiment.polarity > 0:
-            return 'positive'
-        elif analysis.sentiment.polarity == 0:
-            return 'neutral'
-        else:
-            return 'negative'
-    
-    def get_tweets(self, query, count=100):
-        """Fetch tweets and analyze sentiment."""
-        tweets = []
-        try:
-            fetched_tweets = self.api.search_tweets(q=query, count=count, lang="en", tweet_mode="extended")
-            
-            for tweet in fetched_tweets:
-                parsed_tweet = {
-                    'text': tweet.full_text,
-                    'sentiment': self.get_tweet_sentiment(tweet.full_text),
-                    'retweets': tweet.retweet_count,
+elif mode == "Live Twitter Stream":
+    if not bearer_token:
+        st.warning("Please enter your Twitter Bearer Token in the sidebar.")
+    else:
+        st.write("🔄 Connecting to X Stream...")
+        # Stream Listener setup would go here using tweepy.StreamingClient
+        st.error("Live Stream requires an elevated X API Developer account.")
+        # Minimal implementation for streaming:
+        # class MyStream(tweepy.StreamingClient):
+        #     def on_tweet(self, tweet):
+        #         res = process_tweet(tweet.text)
+        #         st.write(res)                    'retweets': tweet.retweet_count,
                     'likes': tweet.favorite_count
                 }
                 if parsed_tweet not in tweets:
